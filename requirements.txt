@@ -1,0 +1,16 @@
+pandas>=2.1,<4
+numpy>=1.26
+pyarrow>=14.0
+duckdb>=1.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0
+requests>=2.31
+
+prefect>=2.14,<4
+streamlit>=1.50
+plotly>=5.18
+
+kafka-python>=2.0.6
+prometheus-client>=0.19
+
+pytest>=7.4

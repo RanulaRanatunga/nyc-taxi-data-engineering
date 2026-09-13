@@ -1,0 +1,67 @@
+groups:
+  - name: kafka-cluster
+    rules:
+      - alert: KafkaExporterDown
+        expr: up{job="kafka-exporter"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "kafka-exporter is not reachable; cluster health is unknown"
+
+      - alert: KafkaBrokerDown
+        expr: kafka_brokers < 3
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Only {{ $value }} of 3 Kafka brokers are online"
+
+      - alert: KafkaUnderReplicatedPartitions
+        expr: sum(kafka_topic_partition_under_replicated_partition{topic="taxi-trips-stream"}) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} partitions of taxi-trips-stream are under-replicated"
+
+      - alert: KafkaPartitionBelowMinIsr
+        expr: min(kafka_topic_partition_in_sync_replica{topic="taxi-trips-stream"}) < 2
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "A partition has fewer than min.insync.replicas=2; acks=all producers will fail"
+
+  - name: streaming-pipeline
+    rules:
+      - alert: StreamingConsumerDown
+        expr: up{job="taxi-stream-consumer"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Stream consumer metrics endpoint is down"
+
+      - alert: ConsumerLagHigh
+        expr: sum(kafka_consumergroup_lag{consumergroup="taxi-stream-analytics-group", topic="taxi-trips-stream"}) > 1000
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Consumer group lag is {{ $value }} records"
+
+      - alert: HighLateEventRatio
+        expr: |
+          sum(rate(streaming_events_processed_total{status="late"}[5m]))
+            / clamp_min(sum(rate(streaming_events_processed_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 5% of events arrive after the watermark"
+
+      - alert: SustainedBackpressure
+        expr: max_over_time(streaming_backpressure_active[2m]) == 1 and avg_over_time(streaming_backpressure_active[5m]) > 0.5
+        labels: { severity: warning }
+        annotations:
+          summary: "Consumer has been throttled by a slow database for several minutes"
+
+      - alert: DatabaseWriteErrors
+        expr: increase(streaming_database_write_errors_total[5m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Streaming database writes are failing (batches are being retried)"

@@ -1,0 +1,175 @@
+x-kafka-base: &kafka-base
+  image: confluentinc/cp-kafka:7.6.1
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+    interval: 10s
+    timeout: 10s
+    retries: 12
+    start_period: 20s
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+  KAFKA_PROCESS_ROLES: "broker,controller"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-broker-1:29093,2@kafka-broker-2:29093,3@kafka-broker-3:29093"
+  KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+  KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+  KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+  KAFKA_LOG_RETENTION_HOURS: 24
+  KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+
+services:
+  kafka-broker-1:
+    <<: *kafka-base
+    container_name: kafka-broker-1
+    hostname: kafka-broker-1
+    ports:
+      - "9092:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-broker-1:29092,PLAINTEXT_HOST://localhost:9092"
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
+
+  kafka-broker-2:
+    <<: *kafka-base
+    container_name: kafka-broker-2
+    hostname: kafka-broker-2
+    ports:
+      - "9094:9094"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9094"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-broker-2:29092,PLAINTEXT_HOST://localhost:9094"
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
+
+  kafka-broker-3:
+    <<: *kafka-base
+    container_name: kafka-broker-3
+    hostname: kafka-broker-3
+    ports:
+      - "9096:9096"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9096"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-broker-3:29092,PLAINTEXT_HOST://localhost:9096"
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
+
+  kafka-init-topics:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka-init-topics
+    restart: "no"
+    depends_on:
+      kafka-broker-1: { condition: service_healthy }
+      kafka-broker-2: { condition: service_healthy }
+      kafka-broker-3: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        BOOTSTRAP=kafka-broker-1:29092,kafka-broker-2:29092,kafka-broker-3:29092
+        kafka-topics --bootstrap-server $$BOOTSTRAP --create --if-not-exists \
+          --topic taxi-trips-stream --partitions 6 --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=86400000 \
+          --config cleanup.policy=delete \
+          --config max.message.bytes=1048576
+        kafka-topics --bootstrap-server $$BOOTSTRAP --create --if-not-exists \
+          --topic taxi-trips-dlq --partitions 3 --replication-factor 3 \
+          --config min.insync.replicas=2 \
+          --config retention.ms=604800000
+        kafka-topics --bootstrap-server $$BOOTSTRAP --describe --topic taxi-trips-stream
+        kafka-topics --bootstrap-server $$BOOTSTRAP --describe --topic taxi-trips-dlq
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: kafka-exporter
+    restart: unless-stopped
+    command:
+      - "--kafka.server=kafka-broker-1:29092"
+      - "--kafka.server=kafka-broker-2:29092"
+      - "--kafka.server=kafka-broker-3:29092"
+      - "--topic.filter=^taxi-.*"
+    ports:
+      - "9308:9308"
+    depends_on:
+      kafka-init-topics: { condition: service_completed_successfully }
+
+  streaming-postgres:
+    image: postgres:16-alpine
+    container_name: streaming-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nyc_taxi_streaming
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - streaming-pgdata:/var/lib/postgresql/data
+      - ./sql/streaming_schema.sql:/docker-entrypoint-initdb.d/01-streaming-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nyc_taxi_streaming"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: nyc_taxi_prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: nyc_taxi_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/streaming_observability.json
+    volumes:
+      - ./config/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:
+  streaming-pgdata:
+  prometheus-data:
+  grafana-data:
